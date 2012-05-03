@@ -1,0 +1,7 @@
+#       name    value
+S       server  fe80::2
+S       in_if   eth0
+#       port    ignored proto  in_if    to
+A       22	22	tcp    $in_if   $server
+A       80	80	tcp    $in_if   $server
+A       443	443	tcp    $in_if   $server

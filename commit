@@ -1,0 +1,123 @@
+#!/usr/bin/ruby
+require 'optparse'
+
+FW_DIR = "/root/fw"
+ALLOW_CHAIN = "PORT"
+
+# parse config
+def elem_val(conf_var, value)
+  if value[0] == "$"
+    return conf_var[value[1..-1]]
+  else
+    return value
+  end
+end
+def elem_arg(conf_var, name, value)
+  if value == "*"
+    return ""
+  else
+    return "#{name} #{elem_val(conf_var, value)}"
+  end
+end
+
+# command line option
+CMD_OPTS = {}
+OptionParser.new do |opt|
+  opt.on('--v4 [ipv4]') {|v| CMD_OPTS[:v4] = true}
+  opt.on('--v6 [ipv6]') {|v| CMD_OPTS[:v6] = true}
+  opt.on('-r [restore defult]') {|v| CMD_OPTS[:r] = true}
+  opt.parse!(ARGV)
+end
+
+if CMD_OPTS[:v4]
+  BASE = "#{FW_DIR}/base.4"
+  PORT = "#{FW_DIR}/port.4"
+  CMD = "/sbin/iptables"
+elsif CMD_OPTS[:v6]
+  BASE = "#{FW_DIR}/base.6"
+  PORT = "#{FW_DIR}/port.6"
+  CMD = "/sbin/ip6tables"
+else
+  abort("-v4 or -v6 required")
+end
+
+
+# initialize rules if '-r' given
+if CMD_OPTS[:r]
+  # flush once
+  system("#{CMD} --flush")
+  system("#{CMD} -X")
+  system("#{CMD} --flush -t mangle")
+  system("#{CMD} -X -t mangle")
+  system("#{CMD} --flush -t nat") if CMD_OPTS[:v4]
+  system("#{CMD} -X -t nat") if CMD_OPTS[:v4]
+  f = open(BASE)
+  f.each do |line|
+    line.strip!
+    next if line == "" || line[0] == "#" # comment or empty line
+    system("#{CMD} #{line}")
+  end
+  f.close
+end
+
+
+OUTPUT = '> /dev/null 2>&1'
+
+# if ALLOW chain does not exist, create it
+system("#{CMD} -N #{ALLOW_CHAIN}") if !system("#{CMD} -L #{ALLOW_CHAIN} #{OUTPUT}")
+system("#{CMD} -N #{ALLOW_CHAIN} -t nat") if CMD_OPTS[:v4] && !system("#{CMD} -L #{ALLOW_CHAIN} -t nat #{OUTPUT}")
+
+# Append ALLOW chain to FORWARD and INPUT chain
+system("#{CMD} -A FORWARD -j #{ALLOW_CHAIN}") if !system("#{CMD} -C FORWARD -j #{ALLOW_CHAIN} #{OUTPUT}")
+system("#{CMD} -A INPUT -j #{ALLOW_CHAIN}") if !system("#{CMD} -C INPUT -j #{ALLOW_CHAIN} #{OUTPUT}")
+system("#{CMD} -A PREROUTING -j #{ALLOW_CHAIN} -t nat") if CMD_OPTS[:v4] && !system("#{CMD} -C PREROUTING -j #{ALLOW_CHAIN} -t nat #{OUTPUT}")
+
+# flush the chain once, we use ALLOW file, not DEFAULT
+system("#{CMD} -F #{ALLOW_CHAIN}")
+system("#{CMD} -F #{ALLOW_CHAIN} -t nat") if CMD_OPTS[:v4]
+
+# count how many rules exists now
+exists_num = `#{CMD} -L #{ALLOW_CHAIN} | wc -l`.to_i - 2 # 2= header size
+exists_num_nat = `#{CMD} -L #{ALLOW_CHAIN} -t nat | wc -l`.to_i - 2 if CMD_OPTS[:v4]
+
+conf_var =  {}
+f = open(PORT)
+f.each do |line|
+  line.strip!
+  elems  = line.split(/\s+/)
+
+  # comment line
+  next if elems[0][0] == "#"
+
+  case elems[0]
+  when "S"
+    # set a variable
+    conf_var[elems[1]] = elems[2]
+  when "A", "M"
+    # append a new rule
+    dport = elem_arg(conf_var, "--dport", elems[1])
+    # elems[2] is not used
+    proto = elem_arg(conf_var, "-p", elems[3])
+    in_if = elem_arg(conf_var, "-i", elems[4])
+    dest = elem_arg(conf_var, "-d", elems[5])
+    system("#{CMD} -A #{ALLOW_CHAIN} -j ACCEPT #{proto} #{dport} #{in_if} #{dest}")
+  end
+
+  if elems[0] == "M"
+    proto = elem_arg(conf_var, "-p", elems[3])
+    in_if = elem_arg(conf_var, "-i", elems[4])
+    to = elem_arg(conf_var, "--to", "#{elem_val(conf_var, elems[5])}:#{elem_val(conf_var, elems[2])}")
+    system("#{CMD} -A #{ALLOW_CHAIN} -t nat -j DNAT #{proto} #{dport} #{in_if} #{to}")
+  end
+end
+f.close
+
+# delete old rules
+exists_num.times do
+  system("#{CMD} -D #{ALLOW_CHAIN} 1")
+end
+if CMD_OPTS[:v4]
+exists_num_nat.times do
+  system("#{CMD} -t nat -D #{ALLOW_CHAIN} 1")
+end
+end
